@@ -1,695 +1,395 @@
+
 (() => {
-  'use strict';
+  "use strict";
 
-  const GLOBAL_KEY = '__ymTrackCollector';
-  const VERSION = '1.1.0';
-
-  if (window[GLOBAL_KEY]?.cleanup) {
-    window[GLOBAL_KEY].cleanup();
-  }
-
-  const CFG = {
-    debounceMs: 120,
-    settleMs: 8000,
-    settleStableMs: 900,
-    settleTickMs: 200,
-    maxParentLevels: 8
-  };
-
-  const SELECTORS = {
-    trackLink: 'a[href*="/track/"]',
-    artistLink: 'a[href*="/artist/"]',
-    row: [
-      '[data-testid*="track"]',
-      '[data-testid*="Track"]',
-      '[class*="track"]',
-      '[class*="Track"]',
-      '[class*="playlist__item"]',
-      '[role="row"]',
-      'li'
-    ].join(','),
-    title: [
-      '[data-testid*="title"]',
-      '[data-testid*="Title"]',
-      '[class*="title"]',
-      '[class*="Title"]'
-    ].join(','),
-    artist: [
-      '[data-testid*="artist"]',
-      '[data-testid*="Artist"]',
-      '[class*="artist"]',
-      '[class*="Artist"]'
-    ].join(','),
-    duration: [
-      'time',
-      '[data-testid*="duration"]',
-      '[data-testid*="Duration"]',
-      '[class*="duration"]',
-      '[class*="Duration"]'
-    ].join(',')
-  };
+  const OLD = window.__ymCleanCollector;
+  if (OLD?.destroy) OLD.destroy();
 
   const tracks = new Map();
+  const order = [];
 
-  const state = {
-    running: true,
-    observer: null,
-    listeners: [],
-    timers: new Set()
-  };
+  let active = true;
+  let observer = null;
+  let timer = null;
+  let busy = false;
 
-  window[GLOBAL_KEY] = state;
-
-  // =========================
-  // STYLES
-  // =========================
-
-  const injectStyles = () => {
-    if (document.getElementById('ym-scraper-styles')) {
-      return;
-    }
-
-    const style = document.createElement('style');
-
-    style.id = 'ym-scraper-styles';
-
-    style.textContent = `
-      #ym-scraper {
-        position: fixed;
-        top: 24px;
-        right: 24px;
-        z-index: 999999;
-        width: 290px;
-        background: #0e0e0e;
-        border: 1px solid #222;
-        border-radius: 12px;
-        padding: 18px;
-        font-family:
-          ui-monospace,
-          SFMono-Regular,
-          Menlo,
-          Monaco,
-          Consolas,
-          "Courier New",
-          monospace;
-        font-size: 12px;
-        color: #999;
-        box-shadow: 0 8px 40px rgba(0, 0, 0, .6);
-      }
-
-      #ym-scraper .h {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 12px;
-        margin-bottom: 10px;
-      }
-
-      #ym-scraper .l {
-        font-size: 10px;
-        letter-spacing: .12em;
-        text-transform: uppercase;
-        color: #444;
-      }
-
-      #ym-scraper .v {
-        color: #333;
-        font-size: 10px;
-      }
-
-      #ym-scraper .dot {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background: #3b3b3b;
-        flex: 0 0 auto;
-      }
-
-      #ym-scraper .dot.a {
-        background: #c8f560;
-        box-shadow: 0 0 8px rgba(200, 245, 96, .5);
-      }
-
-      #ym-scraper .c {
-        font-size: 34px;
-        color: #f0f0f0;
-        line-height: 1;
-        margin: 6px 0;
-      }
-
-      #ym-scraper .s {
-        font-size: 11px;
-        color: #555;
-        min-height: 14px;
-        margin: 10px 0 12px;
-      }
-
-      #ym-scraper button {
-        width: 100%;
-        padding: 9px 12px;
-        border: 1px solid #2a2a2a;
-        border-radius: 8px;
-        background: transparent;
-        color: #ccc;
-        font: inherit;
-        font-size: 11px;
-        letter-spacing: .06em;
-        cursor: pointer;
-        text-align: left;
-        margin-top: 8px;
-      }
-
-      #ym-scraper button:hover {
-        background: #1a1a1a;
-        border-color: #444;
-        color: #fff;
-      }
-
-      #ym-scraper button.p {
-        border-color: #c8f560;
-        color: #c8f560;
-      }
-
-      #ym-scraper button.p:hover {
-        background: rgba(200, 245, 96, .07);
-      }
-
-      #ym-scraper .f {
-        margin-top: 12px;
-        font-size: 10px;
-        color: #2e2e2e;
-      }
-
-      #ym-scraper .f span {
-        color: #c8f560;
-      }
-    `;
-
-    document.head.appendChild(style);
-  };
-
-  // =========================
-  // HELPERS
-  // =========================
-
-  const safeText = (element) => {
-    if (!element) {
-      return '';
-    }
-
-    return (element.textContent || '')
-      .replace(/\u00a0/g, ' ')
-      .replace(/\s+/g, ' ')
+  const normalize = value =>
+    String(value || "")
+      .replace(/\u00a0/g, " ")
+      .replace(/\s+/g, " ")
       .trim();
-  };
 
-  const unique = (array) => {
-    return Array.from(new Set(array.filter(Boolean)));
-  };
+  const cleanTitle = value =>
+    normalize(value)
+      .replace(/^(?:Трек|Track)\s*[:：-]?\s*/i, "")
+      .trim();
 
-  const escapeHtml = (value) => {
-    return String(value)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
-  };
+  function cleanArtists(values) {
+    const names = values
+      .flatMap(x => normalize(x).split(/\s*,\s*/))
+      .filter(Boolean);
 
-  const csvCell = (value) => {
-    return `"${String(value || '').replace(/"/g, '""')}"`;
-  };
+    const seen = new Set();
 
-  const isDurationText = (value) => {
-    return /^\d{1,2}:\d{2}$/.test(value);
-  };
+    return names.filter(name => {
+      const key = name.toLocaleLowerCase();
 
-  const getTrackId = (href) => {
-    if (!href) {
-      return '';
-    }
+      if (seen.has(key)) return false;
 
-    const match = String(href).match(/\/track\/(\d+)/);
+      seen.add(key);
+      return true;
+    }).join(", ");
+  }
 
-    return match ? match[1] : '';
-  };
+  function getRow(link) {
+    let node = link.parentElement;
+    let fallback = node;
 
-  const closestTrackContainer = (trackElement) => {
-    let container = trackElement.parentElement;
-    let firstRowCandidate = null;
+    for (let i = 0; node && i < 9; i++) {
+      const artistLinks =
+        node.querySelectorAll('a[href*="/artist/"]');
 
-    for (
-      let level = 0;
-      level < CFG.maxParentLevels && container;
-      level += 1
-    ) {
-      if (!firstRowCandidate && container.matches?.(SELECTORS.row)) {
-        firstRowCandidate = container;
+      const trackLinks =
+        node.querySelectorAll('a[href*="/track/"]');
+
+      if (artistLinks.length && trackLinks.length === 1) {
+        return node;
       }
 
       if (
-        container.querySelector(SELECTORS.artistLink) ||
-        container.querySelector(SELECTORS.duration)
+        node.matches?.(
+          '[role="row"],[data-testid*="track"],li'
+        )
       ) {
-        return container;
+        fallback = node;
       }
 
-      container = container.parentElement;
+      node = node.parentElement;
     }
 
-    return firstRowCandidate || trackElement.parentElement || trackElement;
-  };
+    return fallback || link.parentElement;
+  }
 
-  const extractTitle = (trackElement, container) => {
-    const candidates = unique([
-      trackElement.getAttribute('title'),
-      trackElement.getAttribute('aria-label'),
-      safeText(trackElement),
-      ...Array.from(container.querySelectorAll(SELECTORS.title)).map(safeText)
-    ]);
+  function extractTrack(link) {
+    const href = link.getAttribute("href") || "";
+    const match = href.match(/\/track\/(\d+)/);
 
-    return candidates.find((value) => {
-      return value && !isDurationText(value);
-    }) || '';
-  };
+    if (!match) return null;
 
-  const extractArtists = (container, title) => {
-    const fromLinks = Array.from(
-      container.querySelectorAll(SELECTORS.artistLink)
-    ).map(safeText);
+    const id = match[1];
+    const row = getRow(link);
 
-    const fromLabels = Array.from(
-      container.querySelectorAll(SELECTORS.artist)
-    ).map(safeText);
+    const title = cleanTitle(
+      normalize(link.textContent) ||
+      link.getAttribute("title") ||
+      link.getAttribute("aria-label")
+    );
 
-    return unique([...fromLinks, ...fromLabels])
-      .filter((value) => value !== title)
-      .join(', ');
-  };
+    if (!title) return null;
 
-  const extractDuration = (container) => {
-    const fromElement = Array.from(
-      container.querySelectorAll(SELECTORS.duration)
-    )
-      .map(safeText)
-      .find(isDurationText);
+    const artistLinks = [
+      ...row.querySelectorAll('a[href*="/artist/"]')
+    ];
 
-    if (fromElement) {
-      return fromElement;
+    let artists = artistLinks
+      .map(a => normalize(a.textContent))
+      .filter(Boolean);
+
+    if (!artists.length) {
+      artists = [
+        ...row.querySelectorAll(
+          '[data-testid*="artist"],' +
+          '[class*="artist"],' +
+          '[class*="Artist"]'
+        )
+      ].map(x => normalize(x.textContent));
     }
-
-    const match = safeText(container).match(/\b\d{1,2}:\d{2}\b/);
-
-    return match ? match[0] : '';
-  };
-
-  const mergeTrack = (nextTrack) => {
-    const currentTrack = tracks.get(nextTrack.id);
-
-    if (!currentTrack) {
-      tracks.set(nextTrack.id, nextTrack);
-      return true;
-    }
-
-    const mergedTrack = {
-      ...currentTrack,
-      title: currentTrack.title || nextTrack.title,
-      artists: currentTrack.artists || nextTrack.artists,
-      duration: currentTrack.duration || nextTrack.duration
-    };
-
-    const changed =
-      mergedTrack.title !== currentTrack.title ||
-      mergedTrack.artists !== currentTrack.artists ||
-      mergedTrack.duration !== currentTrack.duration;
-
-    if (changed) {
-      tracks.set(nextTrack.id, mergedTrack);
-    }
-
-    return changed;
-  };
-
-  const setManagedTimeout = (fn, ms) => {
-    const timer = setTimeout(() => {
-      state.timers.delete(timer);
-      fn();
-    }, ms);
-
-    state.timers.add(timer);
-
-    return timer;
-  };
-
-  const debounce = (fn, ms) => {
-    let timer;
-
-    return (...args) => {
-      clearTimeout(timer);
-      state.timers.delete(timer);
-
-      timer = setManagedTimeout(() => {
-        fn(...args);
-      }, ms);
-    };
-  };
-
-  const addListener = (target, eventName, handler, options) => {
-    if (!target?.addEventListener) {
-      return;
-    }
-
-    target.addEventListener(eventName, handler, options);
-    state.listeners.push({
-      target,
-      eventName,
-      handler,
-      options
-    });
-  };
-
-  const stopWatchers = () => {
-    state.listeners.forEach((listener) => {
-      listener.target.removeEventListener(
-        listener.eventName,
-        listener.handler,
-        listener.options
-      );
-    });
-
-    state.listeners = [];
-
-    if (state.observer) {
-      state.observer.disconnect();
-      state.observer = null;
-    }
-
-    state.timers.forEach((timer) => {
-      clearTimeout(timer);
-    });
-
-    state.timers.clear();
-  };
-
-  state.cleanup = () => {
-    stopWatchers();
-
-    document.getElementById('ym-scraper')?.remove();
-  };
-
-  // =========================
-  // EXTRACT TRACKS
-  // =========================
-
-  const extractTracks = () => {
-    let changed = false;
-
-    document.querySelectorAll(SELECTORS.trackLink).forEach((trackElement) => {
-      const id = getTrackId(trackElement.href);
-
-      if (!id) {
-        return;
-      }
-
-      const container = closestTrackContainer(trackElement);
-      const title = extractTitle(trackElement, container);
-
-      if (!title) {
-        return;
-      }
-
-      changed = mergeTrack({
-        id,
-        title,
-        artists: extractArtists(container, title),
-        duration: extractDuration(container)
-      }) || changed;
-    });
-
-    return changed;
-  };
-
-  // =========================
-  // FORMAT
-  // =========================
-
-  const formatTracks = () => {
-    const array = Array.from(tracks.values());
-
-    const txt = array
-      .map((track) => {
-        if (track.artists) {
-          return `${track.artists} - ${track.title}`;
-        }
-
-        return track.title;
-      })
-      .join('\n');
-
-    const csvRows = array.map((track) => {
-      return [
-        track.artists,
-        track.title,
-        track.duration
-      ].map(csvCell).join(',');
-    });
-
-    const csv = [
-      'Artist,Title,Duration',
-      ...csvRows
-    ].join('\n');
 
     return {
-      txt,
-      csv
+      id,
+      artist: cleanArtists(artists),
+      title
     };
-  };
+  }
 
-  // =========================
-  // DOWNLOAD
-  // =========================
+  // Preserve playlist order using neighbouring tracks.
 
-  const downloadFile = (content, filename, type) => {
-    const blob = new Blob(
-      [content],
-      {
-        type: `${type};charset=utf-8`
+  function mergeOrder(visibleIds) {
+    let previous = null;
+
+    for (let i = 0; i < visibleIds.length; i++) {
+      const id = visibleIds[i];
+
+      if (order.includes(id)) {
+        previous = id;
+        continue;
       }
+
+      let next = null;
+
+      for (let j = i + 1; j < visibleIds.length; j++) {
+        if (order.includes(visibleIds[j])) {
+          next = visibleIds[j];
+          break;
+        }
+      }
+
+      if (previous && order.includes(previous)) {
+        const position = order.indexOf(previous);
+
+        order.splice(position + 1, 0, id);
+      } else if (next && order.includes(next)) {
+        const position = order.indexOf(next);
+
+        order.splice(position, 0, id);
+      } else {
+        order.push(id);
+      }
+
+      previous = id;
+    }
+  }
+
+  function collect() {
+    if (!active || busy) return;
+
+    busy = true;
+
+    try {
+      const links = [
+        ...document.querySelectorAll(
+          'a[href*="/track/"]'
+        )
+      ].filter(link => !panel.contains(link));
+
+      const visibleIds = [];
+      const seen = new Set();
+
+      for (const link of links) {
+        const track = extractTrack(link);
+
+        if (!track || seen.has(track.id)) continue;
+
+        seen.add(track.id);
+        visibleIds.push(track.id);
+
+        const old = tracks.get(track.id);
+
+        if (!old) {
+          tracks.set(track.id, track);
+        } else {
+          tracks.set(track.id, {
+            ...old,
+            artist: old.artist || track.artist,
+            title: old.title || track.title
+          });
+        }
+      }
+
+      mergeOrder(visibleIds);
+      updateCount();
+    } finally {
+      busy = false;
+    }
+  }
+
+  function orderedTracks() {
+    return order
+      .map(id => tracks.get(id))
+      .filter(Boolean);
+  }
+
+  function getTXT() {
+    return orderedTracks()
+      .map(t =>
+        `${t.artist ? t.artist + " - " : ""}${t.title}`
+      )
+      .join("\n");
+  }
+
+  function csvCell(value) {
+    return '"' +
+      String(value || "").replace(/"/g, '""') +
+      '"';
+  }
+
+  function getCSV() {
+    return [
+      "Artist,Title",
+      ...orderedTracks().map(t =>
+        [t.artist, t.title].map(csvCell).join(",")
+      )
+    ].join("\n");
+  }
+
+  function download(content, filename, mime) {
+    const blob = new Blob(
+      ["\ufeff", content],
+      { type: mime + ";charset=utf-8" }
     );
 
     const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
+    const a = document.createElement("a");
 
-    link.href = url;
-    link.download = filename;
+    a.href = url;
+    a.download = filename;
 
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
 
-    setManagedTimeout(() => {
-      URL.revokeObjectURL(url);
-    }, 1000);
-  };
-
-  // =========================
-  // PANEL
-  // =========================
-
-  const getPanel = () => {
-    let panel = document.getElementById('ym-scraper');
-
-    if (!panel) {
-      panel = document.createElement('div');
-      panel.id = 'ym-scraper';
-      document.body.appendChild(panel);
-    }
-
-    return panel;
-  };
-
-  const renderPanel = (stateText = '') => {
-    const panel = getPanel();
-    const safeStateText = escapeHtml(stateText || (
-      state.running
-        ? 'Scroll manually - collecting tracks'
-        : 'Ready to download'
-    ));
-
-    panel.innerHTML = `
-      <div class="h">
-        <div>
-          <div class="l">Track Collector</div>
-          <div class="v">v${VERSION}</div>
-        </div>
-
-        <div class="dot ${state.running ? 'a' : ''}"></div>
-      </div>
-
-      <div class="c">${tracks.size}</div>
-
-      <div class="s">${safeStateText}</div>
-
-      ${
-        state.running
-          ? `
-            <button id="ym-settle" class="p">Finalize capture</button>
-            <button id="ym-stop">Stop</button>
-          `
-          : `
-            <button id="ym-dl-txt" class="p">Download .txt</button>
-            <button id="ym-dl-csv">Download .csv</button>
-          `
-      }
-
-      <div class="f">tool by <span>idaniil24</span></div>
-    `;
-
-    if (state.running) {
-      document.getElementById('ym-stop')?.addEventListener('click', () => {
-        state.running = false;
-        stopWatchers();
-        renderPanel('Stopped');
-      });
-
-      document.getElementById('ym-settle')?.addEventListener(
-        'click',
-        settleCapture
-      );
-
-      return;
-    }
-
-    document.getElementById('ym-dl-txt')?.addEventListener('click', () => {
-      downloadFile(formatTracks().txt, 'tracks.txt', 'text/plain');
-    });
-
-    document.getElementById('ym-dl-csv')?.addEventListener('click', () => {
-      downloadFile(formatTracks().csv, 'tracks.csv', 'text/csv');
-    });
-  };
-
-  // =========================
-  // FINALIZE
-  // =========================
-
-  const sleep = (ms) => {
-    return new Promise((resolve) => {
-      setManagedTimeout(resolve, ms);
-    });
-  };
-
-  async function settleCapture() {
-    renderPanel('Finalizing capture...');
-
-    const startedAt = Date.now();
-    let stableSince = Date.now();
-
-    while (Date.now() - startedAt < CFG.settleMs) {
-      const changed = extractTracks();
-
-      if (changed) {
-        stableSince = Date.now();
-      }
-
-      renderPanel('Finalizing capture...');
-
-      if (Date.now() - stableSince >= CFG.settleStableMs) {
-        break;
-      }
-
-      await sleep(CFG.settleTickMs);
-    }
-
-    state.running = false;
-    stopWatchers();
-    renderPanel('Ready to download');
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
   }
 
-  // =========================
-  // WATCH
-  // =========================
+  // Interface
 
-  const collectAndRender = (message = 'Collecting tracks...') => {
-    if (!state.running) {
-      return;
-    }
+  const panel = document.createElement("div");
 
-    extractTracks();
-    renderPanel(message);
-  };
+  panel.id = "ym-clean-collector-panel";
 
-  const scheduleCollect = debounce(() => {
-    collectAndRender('Collecting tracks...');
-  }, CFG.debounceMs);
+  Object.assign(panel.style, {
+    position: "fixed",
+    top: "20px",
+    right: "20px",
+    width: "285px",
+    padding: "18px",
+    background: "#151515",
+    color: "#fff",
+    border: "1px solid #444",
+    borderRadius: "12px",
+    boxShadow: "0 8px 32px #0009",
+    zIndex: "2147483647",
+    font: "13px system-ui, sans-serif"
+  });
 
-  const watchDomChanges = () => {
-    if (!document.body || !window.MutationObserver) {
-      return;
-    }
+  const heading = document.createElement("div");
+  heading.textContent = "Yandex Music — Track Export";
+  heading.style.fontWeight = "bold";
 
-    state.observer = new MutationObserver((mutations) => {
-      const panel = document.getElementById('ym-scraper');
-      const hasPageChanges = mutations.some((mutation) => {
-        if (!panel) {
-          return true;
-        }
+  const count = document.createElement("div");
+  count.style.fontSize = "36px";
+  count.style.fontWeight = "bold";
+  count.style.margin = "12px 0";
 
-        const changedNodes = [
-          mutation.target,
-          ...mutation.addedNodes,
-          ...mutation.removedNodes
-        ];
+  const status = document.createElement("div");
+  status.style.color = "#aaa";
+  status.style.marginBottom = "12px";
+  status.style.lineHeight = "1.5";
 
-        return changedNodes.some((node) => {
-          if (node === panel || panel.contains(node)) {
-            return false;
-          }
+  const buttons = document.createElement("div");
 
-          return !node.closest?.('#ym-scraper');
-        });
-      });
+  panel.append(heading, count, status, buttons);
+  document.body.appendChild(panel);
 
-      if (hasPageChanges) {
-        scheduleCollect();
-      }
+  function addButton(label, action, primary = false) {
+    const button = document.createElement("button");
+
+    button.textContent = label;
+
+    Object.assign(button.style, {
+      display: "block",
+      width: "100%",
+      marginTop: "8px",
+      padding: "10px",
+      textAlign: "left",
+      background: primary ? "#d0eb75" : "#292929",
+      color: primary ? "#111" : "#fff",
+      border: "1px solid #555",
+      borderRadius: "7px",
+      cursor: "pointer"
     });
 
-    state.observer.observe(document.body, {
-      childList: true,
-      subtree: true
-    });
-  };
+    button.addEventListener("click", action);
+    buttons.appendChild(button);
 
-  const watchScroll = () => {
-    const scroller = document.querySelector(
-      '[data-virtuoso-scroller="true"]'
+    return button;
+  }
+
+  function updateCount() {
+    count.textContent = String(tracks.size);
+  }
+
+  function stop() {
+    collect();
+
+    active = false;
+
+    observer?.disconnect();
+    clearInterval(timer);
+
+    status.textContent =
+      "Collection finished. Ready to download.";
+
+    buttons.replaceChildren();
+
+    addButton(
+      "Download TXT",
+      () => download(
+        getTXT(),
+        "Yandex Music Collection Tracklist.txt",
+        "text/plain"
+      ),
+      true
     );
 
-    unique([
-      scroller,
-      document.scrollingElement,
-      document.documentElement,
-      window
-    ]).forEach((target) => {
-      addListener(target, 'scroll', scheduleCollect, {
-        passive: true
-      });
-    });
+    addButton(
+      "Download CSV",
+      () => download(
+        getCSV(),
+        "Yandex Music Collection Tracklist.csv",
+        "text/csv"
+      )
+    );
+  }
+
+  addButton("Finish Capture", stop, true);
+
+  // Watch dynamically loaded playlist content.
+
+  observer = new MutationObserver(mutations => {
+    if (!active || busy) return;
+
+    const changedOutsidePanel = mutations.some(
+      mutation =>
+        mutation.target !== panel &&
+        !panel.contains(mutation.target)
+    );
+
+    if (changedOutsidePanel) {
+      collect();
+    }
+  });
+
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true
+  });
+
+  timer = setInterval(() => {
+    if (active) collect();
+  }, 700);
+
+  window.__ymCleanCollector = {
+    destroy() {
+      active = false;
+      observer?.disconnect();
+      clearInterval(timer);
+      panel.remove();
+    },
+    getTracks: orderedTracks,
+    getTXT,
+    getCSV,
+    finish: stop
   };
 
-  // =========================
-  // START
-  // =========================
+  collect();
 
-  injectStyles();
-  renderPanel('Collecting tracks...');
-  extractTracks();
-  watchDomChanges();
-  watchScroll();
-  renderPanel('Scroll manually - collecting tracks');
+  status.textContent =
+    "Scroll slowly from top to bottom. " +
+    "Tracks will be saved in playlist order.";
 
   console.log(
-    `[YM Track Collector] Started v${VERSION}. Found ${tracks.size} tracks.`
+    "[YM Track Export] Started.",
+    "Scroll from the beginning of the playlist."
   );
 })();
