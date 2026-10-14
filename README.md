@@ -1,4 +1,3 @@
-
 # Yandex Music Collection TrackList
 
 A lightweight console script for collecting and exporting tracks from **Yandex Music playlists**.
@@ -18,6 +17,9 @@ Modified and maintained by **[nott-thatt](https://github.com/nott-thatt)**.
 - Collects tracks from Yandex Music playlists
 - Works with virtualized lists and lazy-loaded rows
 - Monitors scrolling and DOM updates
+- Includes unavailable tracks when their titles are still displayed
+- Cleans up duplicate artist names and extra track labels
+- Preserves playlist order during sequential scrolling
 - Exports tracks to TXT
 - Exports tracks to CSV with `Artist,Title,Duration`
 - Runs directly in the browser's DevTools Console
@@ -72,6 +74,9 @@ Artist,Title,Duration
 - Сбор треков из плейлистов Яндекс Музыки
 - Поддержка виртуализированных списков и динамической загрузки
 - Отслеживание прокрутки и изменений DOM
+- Сбор недоступных для воспроизведения треков, если их названия отображаются
+- Удаление повторяющихся исполнителей и лишних подписей к названиям
+- Сохранение порядка песен при последовательной прокрутке
 - Экспорт списка в TXT
 - Экспорт в CSV с колонками `Artist,Title,Duration`
 - Запуск через консоль браузера
