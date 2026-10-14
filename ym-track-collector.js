@@ -2,250 +2,50 @@
 (() => {
   "use strict";
 
-  const OLD = window.__ymCleanCollector;
-  if (OLD?.destroy) OLD.destroy();
+  window.__ymCleanCollector?.destroy?.();
 
   const tracks = new Map();
   const order = [];
-
+  const rowKeys = new WeakMap();
+  let nextLocalId = 1;
   let active = true;
-  let observer = null;
-  let timer = null;
   let busy = false;
+  let observer;
+  let timer;
 
-  const normalize = value =>
-    String(value || "")
-      .replace(/\u00a0/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+  const normalize = value => String(value ?? "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
-  const cleanTitle = value =>
-    normalize(value)
-      .replace(/^(?:Трек|Track)\s*[:：-]?\s*/i, "")
-      .trim();
+  const cleanTitle = value => normalize(value)
+    .replace(/^(?:Трек|Track)\s*[:：-]?\s*/i, "")
+    .trim();
 
-  function cleanArtists(values) {
-    const names = values
-      .flatMap(x => normalize(x).split(/\s*,\s*/))
-      .filter(Boolean);
-
+  const cleanArtists = values => {
     const seen = new Set();
 
-    return names.filter(name => {
-      const key = name.toLocaleLowerCase();
-
-      if (seen.has(key)) return false;
-
-      seen.add(key);
-      return true;
-    }).join(", ");
-  }
-
-  function getRow(link) {
-    let node = link.parentElement;
-    let fallback = node;
-
-    for (let i = 0; node && i < 9; i++) {
-      const artistLinks =
-        node.querySelectorAll('a[href*="/artist/"]');
-
-      const trackLinks =
-        node.querySelectorAll('a[href*="/track/"]');
-
-      if (artistLinks.length && trackLinks.length === 1) {
-        return node;
-      }
-
-      if (
-        node.matches?.(
-          '[role="row"],[data-testid*="track"],li'
-        )
-      ) {
-        fallback = node;
-      }
-
-      node = node.parentElement;
-    }
-
-    return fallback || link.parentElement;
-  }
-
-  function extractTrack(link) {
-    const href = link.getAttribute("href") || "";
-    const match = href.match(/\/track\/(\d+)/);
-
-    if (!match) return null;
-
-    const id = match[1];
-    const row = getRow(link);
-
-    const title = cleanTitle(
-      normalize(link.textContent) ||
-      link.getAttribute("title") ||
-      link.getAttribute("aria-label")
-    );
-
-    if (!title) return null;
-
-    const artistLinks = [
-      ...row.querySelectorAll('a[href*="/artist/"]')
-    ];
-
-    let artists = artistLinks
-      .map(a => normalize(a.textContent))
-      .filter(Boolean);
-
-    if (!artists.length) {
-      artists = [
-        ...row.querySelectorAll(
-          '[data-testid*="artist"],' +
-          '[class*="artist"],' +
-          '[class*="Artist"]'
-        )
-      ].map(x => normalize(x.textContent));
-    }
-
-    return {
-      id,
-      artist: cleanArtists(artists),
-      title
-    };
-  }
-
-  // Preserve playlist order using neighbouring tracks.
-
-  function mergeOrder(visibleIds) {
-    let previous = null;
-
-    for (let i = 0; i < visibleIds.length; i++) {
-      const id = visibleIds[i];
-
-      if (order.includes(id)) {
-        previous = id;
-        continue;
-      }
-
-      let next = null;
-
-      for (let j = i + 1; j < visibleIds.length; j++) {
-        if (order.includes(visibleIds[j])) {
-          next = visibleIds[j];
-          break;
-        }
-      }
-
-      if (previous && order.includes(previous)) {
-        const position = order.indexOf(previous);
-
-        order.splice(position + 1, 0, id);
-      } else if (next && order.includes(next)) {
-        const position = order.indexOf(next);
-
-        order.splice(position, 0, id);
-      } else {
-        order.push(id);
-      }
-
-      previous = id;
-    }
-  }
-
-  function collect() {
-    if (!active || busy) return;
-
-    busy = true;
-
-    try {
-      const links = [
-        ...document.querySelectorAll(
-          'a[href*="/track/"]'
-        )
-      ].filter(link => !panel.contains(link));
-
-      const visibleIds = [];
-      const seen = new Set();
-
-      for (const link of links) {
-        const track = extractTrack(link);
-
-        if (!track || seen.has(track.id)) continue;
-
-        seen.add(track.id);
-        visibleIds.push(track.id);
-
-        const old = tracks.get(track.id);
-
-        if (!old) {
-          tracks.set(track.id, track);
-        } else {
-          tracks.set(track.id, {
-            ...old,
-            artist: old.artist || track.artist,
-            title: old.title || track.title
-          });
-        }
-      }
-
-      mergeOrder(visibleIds);
-      updateCount();
-    } finally {
-      busy = false;
-    }
-  }
-
-  function orderedTracks() {
-    return order
-      .map(id => tracks.get(id))
-      .filter(Boolean);
-  }
-
-  function getTXT() {
-    return orderedTracks()
-      .map(t =>
-        `${t.artist ? t.artist + " - " : ""}${t.title}`
+    return values
+      .flatMap(value =>
+        normalize(value).split(/\s*,\s*/)
       )
-      .join("\n");
-  }
+      .filter(name => {
+        if (!name) return false;
 
-  function csvCell(value) {
-    return '"' +
-      String(value || "").replace(/"/g, '""') +
-      '"';
-  }
+        const key = name.toLocaleLowerCase();
 
-  function getCSV() {
-    return [
-      "Artist,Title",
-      ...orderedTracks().map(t =>
-        [t.artist, t.title].map(csvCell).join(",")
-      )
-    ].join("\n");
-  }
+        if (seen.has(key)) return false;
 
-  function download(content, filename, mime) {
-    const blob = new Blob(
-      ["\ufeff", content],
-      { type: mime + ";charset=utf-8" }
-    );
-
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-
-    a.href = url;
-    a.download = filename;
-
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-
-    setTimeout(() => URL.revokeObjectURL(url), 3000);
-  }
+        seen.add(key);
+        return true;
+      })
+      .join(", ");
+  };
 
   // Interface
 
   const panel = document.createElement("div");
-
-  panel.id = "ym-clean-collector-panel";
+  panel.id = "ym-track-export-panel";
 
   Object.assign(panel.style, {
     position: "fixed",
@@ -267,14 +67,12 @@
   heading.style.fontWeight = "bold";
 
   const count = document.createElement("div");
-  count.style.fontSize = "36px";
-  count.style.fontWeight = "bold";
-  count.style.margin = "12px 0";
+  count.style.cssText =
+    "font-size:36px;font-weight:bold;margin:12px 0";
 
   const status = document.createElement("div");
-  status.style.color = "#aaa";
-  status.style.marginBottom = "12px";
-  status.style.lineHeight = "1.5";
+  status.style.cssText =
+    "color:#aaa;margin-bottom:12px;line-height:1.5";
 
   const buttons = document.createElement("div");
 
@@ -301,17 +99,256 @@
 
     button.addEventListener("click", action);
     buttons.appendChild(button);
-
-    return button;
   }
 
-  function updateCount() {
-    count.textContent = String(tracks.size);
+  // Track extraction
+
+  function extract(row) {
+    const titleNode = row.querySelector(
+      '[class*="Meta_title"]'
+    );
+
+    const artistsNode = row.querySelector(
+      '[class*="Meta_artists"]'
+    );
+
+    const trackLink = row.querySelector(
+      'a[href*="/track/"]'
+    );
+
+    const id = trackLink
+      ?.getAttribute("href")
+      ?.match(/\/track\/(\d+)/)?.[1];
+
+    const image = row.querySelector(
+      'img[alt^="Трек "],img[alt^="Track "]'
+    );
+
+    const rawTitle = cleanTitle(
+      titleNode?.textContent ||
+      trackLink?.textContent ||
+      image?.getAttribute("alt") ||
+      ""
+    );
+
+    if (!rawTitle) return null;
+
+    let title = rawTitle;
+
+    let artist = cleanArtists([
+      ...(artistsNode
+        ? [artistsNode.textContent]
+        : []),
+
+      ...(!artistsNode
+        ? [...row.querySelectorAll(
+            'a[href*="/artist/"]'
+          )].map(a => a.textContent)
+        : [])
+    ]);
+
+    // Handle unavailable MP3 tracks.
+
+    if (!artist && /\.mp3$/i.test(title)) {
+      const withoutExt = title
+        .replace(/\.mp3$/i, "")
+        .trim();
+
+      const divider = withoutExt.indexOf(" - ");
+
+      if (
+        divider > 0 &&
+        divider < withoutExt.length - 3
+      ) {
+        artist = withoutExt
+          .slice(0, divider)
+          .trim();
+
+        title = withoutExt
+          .slice(divider + 3)
+          .trim();
+      } else {
+        title = withoutExt;
+      }
+    }
+
+    // Catalog tracks use their track ID.
+    // Unavailable tracks use a local row ID.
+
+    let key;
+
+    if (id) {
+      key = `track:${id}`;
+    } else {
+      const fingerprint = `${artist}\u0000${title}`;
+      const cached = rowKeys.get(row);
+
+      if (
+        cached &&
+        cached.fingerprint === fingerprint
+      ) {
+        key = cached.key;
+      } else {
+        key = `unavailable:${nextLocalId++}`;
+
+        rowKeys.set(row, {
+          key,
+          fingerprint
+        });
+      }
+    }
+
+    return { key, artist, title };
   }
 
-  function stop() {
+  // Preserve playlist order.
+
+  function mergeOrder(ids) {
+    let previous = null;
+
+    for (let i = 0; i < ids.length; i++) {
+      const key = ids[i];
+
+      if (order.includes(key)) {
+        previous = key;
+        continue;
+      }
+
+      let next = null;
+
+      for (let j = i + 1; j < ids.length; j++) {
+        if (order.includes(ids[j])) {
+          next = ids[j];
+          break;
+        }
+      }
+
+      if (previous && order.includes(previous)) {
+        order.splice(
+          order.indexOf(previous) + 1,
+          0,
+          key
+        );
+      } else if (next) {
+        order.splice(order.indexOf(next), 0, key);
+      } else {
+        order.push(key);
+      }
+
+      previous = key;
+    }
+  }
+
+  // Collect tracks.
+
+  function collect() {
+    if (!active || busy) return;
+
+    busy = true;
+
+    try {
+      const rows = [
+        ...document.querySelectorAll(
+          '[class*="CommonTrack_root"]'
+        )
+      ].filter(row => !panel.contains(row));
+
+      const ids = [];
+      const seen = new Set();
+
+      for (const row of rows) {
+        const item = extract(row);
+
+        if (!item || seen.has(item.key)) continue;
+
+        seen.add(item.key);
+        ids.push(item.key);
+
+        const old = tracks.get(item.key);
+
+        tracks.set(
+          item.key,
+          old
+            ? {
+                ...item,
+                artist: item.artist || old.artist,
+                title: item.title || old.title
+              }
+            : item
+        );
+      }
+
+      mergeOrder(ids);
+
+      count.textContent = String(tracks.size);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function orderedTracks() {
+    return order
+      .map(key => tracks.get(key))
+      .filter(Boolean);
+  }
+
+  // Export TXT and CSV.
+
+  function getTXT() {
+    return orderedTracks()
+      .map(t =>
+        `${t.artist ? `${t.artist} - ` : ""}${t.title}`
+      )
+      .join("\n");
+  }
+
+  function csvCell(value) {
+    return '"' +
+      String(value ?? "").replace(/"/g, '""') +
+      '"';
+  }
+
+  function getCSV() {
+    return [
+      "Artist,Title",
+
+      ...orderedTracks().map(t =>
+        [t.artist, t.title]
+          .map(csvCell)
+          .join(",")
+      )
+    ].join("\n");
+  }
+
+  function download(content, filename, type) {
+    const url = URL.createObjectURL(
+      new Blob(
+        ["\ufeff", content],
+        { type: `${type};charset=utf-8` }
+      )
+    );
+
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = filename;
+
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    setTimeout(
+      () => URL.revokeObjectURL(url),
+      3000
+    );
+  }
+
+  // Finish and download.
+
+  function finish() {
+    if (!active) return;
+
     collect();
-
     active = false;
 
     observer?.disconnect();
@@ -342,20 +379,19 @@
     );
   }
 
-  addButton("Finish Capture", stop, true);
+  addButton("Finish Capture", finish, true);
 
-  // Watch dynamically loaded playlist content.
+  status.textContent =
+    "Scroll from top to bottom to collect all tracks, " +
+    "including unavailable ones.";
 
   observer = new MutationObserver(mutations => {
-    if (!active || busy) return;
-
-    const changedOutsidePanel = mutations.some(
-      mutation =>
-        mutation.target !== panel &&
-        !panel.contains(mutation.target)
-    );
-
-    if (changedOutsidePanel) {
+    if (
+      mutations.some(m =>
+        m.target !== panel &&
+        !panel.contains(m.target)
+      )
+    ) {
       collect();
     }
   });
@@ -365,9 +401,7 @@
     subtree: true
   });
 
-  timer = setInterval(() => {
-    if (active) collect();
-  }, 700);
+  timer = setInterval(collect, 700);
 
   window.__ymCleanCollector = {
     destroy() {
@@ -376,20 +410,15 @@
       clearInterval(timer);
       panel.remove();
     },
+    finish,
     getTracks: orderedTracks,
     getTXT,
-    getCSV,
-    finish: stop
+    getCSV
   };
 
   collect();
 
-  status.textContent =
-    "Scroll slowly from top to bottom. " +
-    "Tracks will be saved in playlist order.";
-
   console.log(
-    "[YM Track Export] Started.",
-    "Scroll from the beginning of the playlist."
+    "[YM Track Export] Started — including unavailable tracks."
   );
 })();
